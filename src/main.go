@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -30,6 +32,10 @@ type FormSubmission struct {
 type Config struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
 	MaxFieldLength int      `yaml:"max_field_length"`
+	Auth           struct {
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+	} `yaml:"auth"`
 }
 
 var (
@@ -56,9 +62,20 @@ func loadConfig() error {
 		return fmt.Errorf("config file not found: %v", err)
 	}
 
-	// Check for environment variable for Origins
+	// Check for environment variables
 	if envOrigins := os.Getenv("ALLOWED_ORIGINS"); envOrigins != "" {
 		config.AllowedOrigins = strings.Split(envOrigins, ",")
+	}
+	if envUsername := os.Getenv("AUTH_USERNAME"); envUsername != "" {
+		config.Auth.Username = envUsername
+	}
+	if envPassword := os.Getenv("AUTH_PASSWORD"); envPassword != "" {
+		config.Auth.Password = envPassword
+	}
+
+	// Validate required auth configuration
+	if config.Auth.Username == "" || config.Auth.Password == "" {
+		return fmt.Errorf("basic auth credentials are required. Please set them in config.yaml or via AUTH_USERNAME and AUTH_PASSWORD environment variables")
 	}
 
 	return nil
@@ -116,6 +133,7 @@ func main() {
 
 	// Define routes
 	r.POST("/form/:id", handleFormSubmission)
+	r.GET("/data/:id", basicAuthMiddleware(), handleDataExport)
 
 	// Start server
 	logger.Info("Starting server on :8080")
@@ -342,4 +360,110 @@ func handleFormSubmission(c *gin.Context) {
 		"message":   "Form submitted successfully",
 		"projectId": projectIDStr,
 	})
+}
+
+// basicAuthMiddleware handles basic authentication
+func basicAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		username, password, ok := c.Request.BasicAuth()
+		if !ok {
+			c.Header("WWW-Authenticate", `Basic realm="Restricted"`)
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+
+		if username != config.Auth.Username || password != config.Auth.Password {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// handleDataExport handles the data export endpoint
+func handleDataExport(c *gin.Context) {
+	projectIDStr := c.Param("id")
+	format := c.DefaultQuery("format", "json")
+
+	// Validate project ID
+	projectID, err := primitive.ObjectIDFromHex(projectIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+		return
+	}
+
+	// Validate format
+	if format != "json" && format != "csv" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid format. Use 'json' or 'csv'"})
+		return
+	}
+
+	// Query MongoDB
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cursor, err := collection.Find(ctx, bson.M{"projectId": projectID})
+	if err != nil {
+		logger.WithError(err).Error("Failed to query submissions")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query submissions"})
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var submissions []FormSubmission
+	if err = cursor.All(ctx, &submissions); err != nil {
+		logger.WithError(err).Error("Failed to decode submissions")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decode submissions"})
+		return
+	}
+
+	// Extract content from submissions
+	var contents []map[string]interface{}
+	for _, submission := range submissions {
+		contents = append(contents, submission.Content)
+	}
+
+	// Return data in requested format
+	switch format {
+	case "json":
+		c.JSON(http.StatusOK, contents)
+	case "csv":
+		if len(contents) == 0 {
+			c.String(http.StatusOK, "")
+			return
+		}
+
+		// Get all unique keys
+		keys := make(map[string]bool)
+		for _, content := range contents {
+			for key := range content {
+				keys[key] = true
+			}
+		}
+
+		// Create CSV header
+		header := make([]string, 0, len(keys))
+		for key := range keys {
+			header = append(header, key)
+		}
+
+		// Write CSV
+		c.Header("Content-Type", "text/csv")
+		c.Header("Content-Disposition", "attachment; filename=export.csv")
+		writer := csv.NewWriter(c.Writer)
+		writer.Write(header)
+
+		// Write data rows
+		for _, content := range contents {
+			row := make([]string, len(header))
+			for i, key := range header {
+				if value, ok := content[key]; ok {
+					row[i] = fmt.Sprintf("%v", value)
+				}
+			}
+			writer.Write(row)
+		}
+		writer.Flush()
+	}
 }

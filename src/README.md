@@ -11,6 +11,8 @@ A simple and secure form submission service built with Go and Gin. This service 
 - Request size limiting
 - Comprehensive logging
 - MongoDB storage
+- Data export in JSON and CSV formats
+- Mandatory Basic authentication for data access
 
 ## Prerequisites
 
@@ -48,17 +50,29 @@ allowed_origins:
 
 # Maximum length for text fields (optional, default: 1000)
 max_field_length: 1000
+
+# Basic Auth configuration (required)
+auth:
+  username: "admin"
+  password: "secret"
 ```
 
 ### Environment Variables
 
-You can override the allowed origins using the `ALLOWED_ORIGINS` environment variable:
+You can override the configuration using environment variables:
 
 ```bash
+# Override allowed origins
 export ALLOWED_ORIGINS="http://example.com,https://example.com"
+
+# Override basic auth credentials
+export AUTH_USERNAME="admin"
+export AUTH_PASSWORD="secret"
 ```
 
-Note: If both configuration methods are used, the environment variable takes precedence.
+Note: If both configuration methods are used, the environment variables take precedence.
+
+Important: Basic Auth credentials are mandatory. The service will not start without them.
 
 ## Running the Service
 
@@ -74,7 +88,7 @@ go run main.go
 
 The service will start on port 8080 by default.
 
-## API Endpoint
+## API Endpoints
 
 ### Submit Form
 ```
@@ -95,6 +109,40 @@ Response:
 }
 ```
 
+### Export Data
+```
+GET /data/:id?format=json|csv
+```
+
+Parameters:
+- `id`: The project ID (MongoDB ObjectId)
+- `format`: Output format (json or csv, defaults to json)
+
+Authentication:
+- Basic Auth required
+- Username and password must be set in config.yaml or via environment variables
+
+Response (JSON):
+```json
+[
+  {
+    "field1": "value1",
+    "field2": "value2"
+  },
+  {
+    "field1": "value3",
+    "field2": "value4"
+  }
+]
+```
+
+Response (CSV):
+```csv
+field1,field2
+value1,value2
+value3,value4
+```
+
 ## Security Features
 
 - CORS protection with configurable allowed origins
@@ -104,6 +152,7 @@ Response:
 - Request size limiting (1MB)
 - Email validation for email fields
 - HTML tag removal
+- Mandatory Basic authentication for data access
 
 ## Development
 
