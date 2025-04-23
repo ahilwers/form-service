@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"gopkg.in/yaml.v3"
 )
 
 type FormSubmission struct {
@@ -25,37 +28,51 @@ type FormSubmission struct {
 
 // Config holds the service configuration
 type Config struct {
-	AllowedOrigins []string
-	MaxFieldLength int
+	AllowedOrigins []string `yaml:"allowed_origins"`
+	MaxFieldLength int      `yaml:"max_field_length"`
 }
 
 var (
 	client     *mongo.Client
 	collection *mongo.Collection
 	logger     = logrus.New()
-	config     = Config{
-		AllowedOrigins: []string{
-			"http://localhost:8000", // Für lokale Entwicklung
-			"http://timeasy.org",
-			"https://timeasy.org",
-			"http://timeasy.de",
-			"https://timeasy.de",
-			"http://hilwers.net",
-			"https://hilwers.net",
-			"http://hilwers-software.com",
-			"https://hilwers-software.com",
-		},
-		MaxFieldLength: 1000, // Maximale Länge für Textfelder
-	}
+	config     Config
 
-	// Reguläre Ausdrücke für die Validierung
+	// Regular expressions for validation
 	emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 )
+
+// loadConfig loads configuration from file and environment variables
+func loadConfig() error {
+	// Default value for MaxFieldLength
+	config.MaxFieldLength = 1000
+
+	// Try to load configuration file
+	if configFile, err := os.ReadFile("config.yaml"); err == nil {
+		if err := yaml.Unmarshal(configFile, &config); err != nil {
+			return fmt.Errorf("failed to parse config file: %v", err)
+		}
+	} else {
+		return fmt.Errorf("config file not found: %v", err)
+	}
+
+	// Check for environment variable for Origins
+	if envOrigins := os.Getenv("ALLOWED_ORIGINS"); envOrigins != "" {
+		config.AllowedOrigins = strings.Split(envOrigins, ",")
+	}
+
+	return nil
+}
 
 func init() {
 	// Configure logger
 	logger.SetFormatter(&logrus.JSONFormatter{})
 	logger.SetLevel(logrus.InfoLevel)
+
+	// Load configuration
+	if err := loadConfig(); err != nil {
+		logger.WithError(err).Fatal("Failed to load configuration")
+	}
 }
 
 func main() {
@@ -72,6 +89,12 @@ func main() {
 
 	// Initialize collection
 	collection = client.Database("formservice").Collection("submissions")
+
+	// Log CORS configuration
+	logger.WithFields(logrus.Fields{
+		"allowed_origins":  config.AllowedOrigins,
+		"max_field_length": config.MaxFieldLength,
+	}).Info("Service configuration loaded")
 
 	// Initialize Gin router
 	r := gin.Default()
@@ -204,13 +227,13 @@ func validateContent(content map[string]interface{}) bool {
 	return true
 }
 
-// sanitizeInput entfernt potenziell schädliche Zeichen und kürzt zu lange Strings
+// sanitizeInput removes potentially harmful characters and truncates long strings
 func sanitizeInput(input string) string {
-	// Entferne HTML-Tags
+	// Remove HTML tags
 	input = strings.ReplaceAll(input, "<", "&lt;")
 	input = strings.ReplaceAll(input, ">", "&gt;")
 
-	// Kürze den String auf die maximale Länge
+	// Truncate string to maximum length
 	if len(input) > config.MaxFieldLength {
 		input = input[:config.MaxFieldLength]
 	}
@@ -218,19 +241,19 @@ func sanitizeInput(input string) string {
 	return input
 }
 
-// validateInput prüft die Eingabedaten auf Gültigkeit
+// validateInput checks input data for validity
 func validateInput(key, value string) (string, bool) {
-	// Sanitize den Input
+	// Sanitize input
 	value = sanitizeInput(value)
 
-	// Spezielle Validierung für E-Mail-Felder
+	// Special validation for email fields
 	if strings.Contains(strings.ToLower(key), "email") {
 		if !emailRegex.MatchString(value) {
 			return "", false
 		}
 	}
 
-	// Prüfe auf leere Strings nach Sanitization
+	// Check for empty strings after sanitization
 	if strings.TrimSpace(value) == "" {
 		return "", false
 	}

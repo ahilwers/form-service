@@ -1,0 +1,8 @@
+# Default configuration for the Form Service
+
+# Allowed origins for CORS
+allowed_origins:
+  - "http://localhost:8000"  # For local development
+
+# Maximum length for text fields (optional, default: 1000)
+# max_field_length: 1000 
