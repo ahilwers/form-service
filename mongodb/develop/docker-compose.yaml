@@ -1,0 +1,21 @@
+version: "3"
+
+volumes:
+  mongo_data:
+    driver: local
+
+services:
+  mongo:
+    ports:
+      - "27017-27019:27017-27019"
+    container_name: "formservice-mongodb"
+    restart: always
+    logging:
+      options:
+        max-size: 1g
+    environment:
+      - MONGO_INITDB_DATABASE=formservice
+    volumes:
+      - mongo_data:/data/db
+    image: "mongo"
+
