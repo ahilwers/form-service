@@ -1,6 +1,6 @@
 # Form Service
 
-A simple and secure form submission service built with Go and Gin. This service allows you to collect form submissions from your websites and store them in MongoDB.
+A simple and secure form submission service built with Go. This service allows you to collect form submissions from your websites and store them in MongoDB.
 
 ## Features
 
@@ -25,11 +25,12 @@ A simple and secure form submission service built with Go and Gin. This service 
 1. Clone the repository:
 ```bash
 git clone https://github.com/ahi/form-service.git
-cd form-service/src
+cd form-service
 ```
 
 2. Install dependencies:
 ```bash
+cd src
 go mod tidy
 ```
 
@@ -83,6 +84,7 @@ mongod
 
 2. Run the service:
 ```bash
+cd src
 go run main.go
 ```
 
@@ -159,6 +161,7 @@ value3,value4
 For local development, you can use the included Python server to serve the example form:
 
 ```bash
+cd src
 chmod +x serve.sh
 ./serve.sh
 ```
@@ -167,4 +170,4 @@ This will start a local server on port 8000, serving the example form at `http:/
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0) - see the LICENSE file for details. 
