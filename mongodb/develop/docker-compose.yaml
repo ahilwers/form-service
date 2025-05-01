@@ -1,7 +1,7 @@
 version: "3"
 
 volumes:
-  mongo_data:
+  mongo_forms_data:
     driver: local
 
 services:
@@ -16,6 +16,6 @@ services:
     environment:
       - MONGO_INITDB_DATABASE=formservice
     volumes:
-      - mongo_data:/data/db
+      - mongo_forms_data:/data/db
     image: "mongo"
 

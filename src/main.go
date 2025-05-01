@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -36,6 +38,13 @@ type Config struct {
 		Username string `yaml:"username"`
 		Password string `yaml:"password"`
 	} `yaml:"auth"`
+	RateLimit      struct {
+		Requests        int     `yaml:"requests"`        // Max requests per period
+		Period          int     `yaml:"period"`          // Period in seconds
+		Burst           int     `yaml:"burst"`           // Max burst size
+		GlobalRequests  int     `yaml:"global_requests"` // Global requests per period
+		IPBlockDuration int     `yaml:"ip_block_duration"` // Duration to block IPs in minutes
+	} `yaml:"rate_limit"`
 }
 
 var (
@@ -50,8 +59,15 @@ var (
 
 // loadConfig loads configuration from file and environment variables
 func loadConfig() error {
-	// Default value for MaxFieldLength
+	// Default values
 	config.MaxFieldLength = 1000
+	
+	// Default rate limit settings
+	config.RateLimit.Requests = 15        // 15 requests
+	config.RateLimit.Period = 60          // per 60 seconds
+	config.RateLimit.Burst = 5            // max 5 in burst
+	config.RateLimit.GlobalRequests = 100 // 100 requests per minute globally
+	config.RateLimit.IPBlockDuration = 30 // Block IPs for 30 minutes
 
 	// Try to load configuration file
 	if configFile, err := os.ReadFile("config.yaml"); err == nil {
@@ -167,36 +183,330 @@ func loggingMiddleware() gin.HandlerFunc {
 	}
 }
 
-func rateLimitMiddleware() gin.HandlerFunc {
-	// Simple rate limiting using a map to track IP addresses
-	// In production, you might want to use Redis or another distributed solution
-	ipRequests := make(map[string]int)
-	lastReset := time.Now()
+// TokenBucket represents a token bucket for rate limiting
+type TokenBucket struct {
+	Tokens         float64   // Current number of tokens
+	Capacity       float64   // Maximum capacity of tokens
+	RefillRate     float64   // Tokens per second to refill
+	LastRefillTime time.Time // Last time tokens were refilled
+	LastRequestTime time.Time // Last time a request was made
+	RequestCount   int       // Count of requests in current period
+	ViolationCount int       // Count of rate limit violations
+	Blocked        bool      // Whether this IP is blocked
+	BlockedUntil   time.Time // When the IP block expires
+}
 
-	return func(c *gin.Context) {
-		ip := c.ClientIP()
-		now := time.Now()
+// RateLimiter manages rate limiting for different IPs
+type RateLimiter struct {
+	Buckets         map[string]*TokenBucket
+	Mu              sync.RWMutex
+	CleanupTimer    *time.Ticker
+	GlobalBucket    *TokenBucket // For global rate limiting
+	SuspiciousIPs   map[string]int // Track potentially malicious IPs
+	BlockedUserAgents []string    // List of blocked user agents
+	RequestPatterns map[string]int // Track suspicious request patterns
+}
 
-		// Reset counters every minute
-		if now.Sub(lastReset) > time.Minute {
-			ipRequests = make(map[string]int)
-			lastReset = now
+// Global rate limiter instance
+var rateLimiter *RateLimiter
+
+// initRateLimiter initializes the rate limiter
+func initRateLimiter() *RateLimiter {
+	r := &RateLimiter{
+		Buckets:         make(map[string]*TokenBucket),
+		CleanupTimer:    time.NewTicker(10 * time.Minute),
+		SuspiciousIPs:   make(map[string]int),
+		BlockedUserAgents: []string{
+			"bot", "crawl", "spider", "scan", // Common bot signatures
+			"python-requests", "Go-http-client", // Common script signatures
+			"curl", "wget", // Common CLI tools
+		},
+		RequestPatterns: make(map[string]int),
+	}
+
+	// Initialize global bucket
+	r.GlobalBucket = &TokenBucket{
+		Tokens:        float64(config.RateLimit.GlobalRequests),
+		Capacity:      float64(config.RateLimit.GlobalRequests),
+		RefillRate:    float64(config.RateLimit.GlobalRequests) / float64(config.RateLimit.Period),
+		LastRefillTime: time.Now(),
+	}
+
+	// Start cleanup goroutine to prevent memory leaks
+	go func() {
+		for range r.CleanupTimer.C {
+			r.cleanup()
 		}
+	}()
 
-		// Allow maximum 10 requests per minute per IP
-		if ipRequests[ip] >= 10 {
+	return r
+}
+
+// cleanup removes buckets that haven't been used in a while
+func (r *RateLimiter) cleanup() {
+	r.Mu.Lock()
+	defer r.Mu.Unlock()
+
+	now := time.Now()
+	threshold := now.Add(-30 * time.Minute)
+	for ip, bucket := range r.Buckets {
+		// Keep blocked IPs in memory until their block expires
+		if bucket.Blocked && bucket.BlockedUntil.After(now) {
+			continue
+		}
+		
+		// Remove old entries
+		if bucket.LastRefillTime.Before(threshold) && !bucket.Blocked {
+			delete(r.Buckets, ip)
+		}
+		
+		// Unblock IPs whose block has expired
+		if bucket.Blocked && bucket.BlockedUntil.Before(now) {
+			bucket.Blocked = false
+			logger.WithField("ip", ip).Info("IP block expired")
+		}
+	}
+	
+	// Clean up suspicious IPs tracking
+	for ip, _ := range r.SuspiciousIPs {
+		if _, exists := r.Buckets[ip]; !exists {
+			delete(r.SuspiciousIPs, ip)
+		}
+	}
+	
+	logger.Info("Rate limiter cleanup completed")
+}
+
+// isUserAgentBlocked checks if the user agent should be blocked
+func (r *RateLimiter) isUserAgentBlocked(userAgent string) bool {
+	userAgent = strings.ToLower(userAgent)
+	for _, blocked := range r.BlockedUserAgents {
+		if strings.Contains(userAgent, blocked) {
+			return true
+		}
+	}
+	return false
+}
+
+// Allow checks if a request is allowed and consumes a token if it is
+func (r *RateLimiter) Allow(c *gin.Context) bool {
+	r.Mu.Lock()
+	defer r.Mu.Unlock()
+
+	ip := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+	path := c.Request.URL.Path
+	now := time.Now()
+	
+	// Check if user agent is blocked
+	if r.isUserAgentBlocked(userAgent) {
+		logger.WithFields(logrus.Fields{
+			"ip": ip,
+			"user_agent": userAgent,
+		}).Warn("Blocked user agent detected")
+		return false
+	}
+	
+	// Track request patterns (e.g., same path from different IPs)
+	patternKey := path + "_" + userAgent
+	r.RequestPatterns[patternKey]++
+	
+	// Check for suspicious pattern (many requests to same path with same user agent)
+	if r.RequestPatterns[patternKey] > 100 {
+		logger.WithFields(logrus.Fields{
+			"pattern": patternKey,
+			"count": r.RequestPatterns[patternKey],
+		}).Warn("Suspicious request pattern detected")
+	}
+
+	// Check global rate limit first
+	elapsed := now.Sub(r.GlobalBucket.LastRefillTime).Seconds()
+	r.GlobalBucket.LastRefillTime = now
+	r.GlobalBucket.Tokens = math.Min(
+		r.GlobalBucket.Capacity, 
+		r.GlobalBucket.Tokens+(elapsed*r.GlobalBucket.RefillRate),
+	)
+	
+	if r.GlobalBucket.Tokens < 1 {
+		logger.Warn("Global rate limit exceeded")
+		return false
+	}
+
+	// Create a new bucket if it doesn't exist
+	bucket, exists := r.Buckets[ip]
+	if !exists {
+		bucket = &TokenBucket{
+			Tokens:         float64(config.RateLimit.Burst),
+			Capacity:       float64(config.RateLimit.Requests),
+			RefillRate:     float64(config.RateLimit.Requests) / float64(config.RateLimit.Period),
+			LastRefillTime: now,
+			LastRequestTime: now,
+		}
+		r.Buckets[ip] = bucket
+	}
+	
+	// Check if IP is blocked
+	if bucket.Blocked {
+		if now.Before(bucket.BlockedUntil) {
+			return false
+		} else {
+			// Unblock if block duration has passed
+			bucket.Blocked = false
+			bucket.ViolationCount = 0
+		}
+	}
+
+	// Check for request rate (requests per second)
+	requestInterval := now.Sub(bucket.LastRequestTime).Seconds()
+	bucket.LastRequestTime = now
+	
+	// If requests are coming too fast (more than 1 per second), mark as suspicious
+	if requestInterval < 1.0 {
+		r.SuspiciousIPs[ip]++
+		
+		// If consistently suspicious, reduce tokens more aggressively
+		if r.SuspiciousIPs[ip] > 5 {
+			bucket.Tokens -= 2 // Penalize suspicious behavior
+			logger.WithField("ip", ip).Warn("Suspicious rapid requests detected")
+		}
+	}
+
+	// Refill tokens based on time elapsed
+	elapsed = now.Sub(bucket.LastRefillTime).Seconds()
+	bucket.LastRefillTime = now
+	bucket.Tokens = math.Min(bucket.Capacity, bucket.Tokens+(elapsed*bucket.RefillRate))
+
+	// Check if we have enough tokens
+	if bucket.Tokens < 1 {
+		// Increment violation count
+		bucket.ViolationCount++
+		
+		// If too many violations, block the IP
+		if bucket.ViolationCount >= 3 {
+			bucket.Blocked = true
+			bucket.BlockedUntil = now.Add(time.Duration(config.RateLimit.IPBlockDuration) * time.Minute)
 			logger.WithFields(logrus.Fields{
 				"ip": ip,
+				"blocked_until": bucket.BlockedUntil,
+			}).Warn("IP blocked due to repeated violations")
+		}
+		
+		return false
+	}
+
+	// Consume tokens (use more tokens for suspicious IPs)
+	tokensToConsume := 1.0
+	if r.SuspiciousIPs[ip] > 10 {
+		tokensToConsume = 2.0
+	}
+	
+	bucket.Tokens -= tokensToConsume
+	r.GlobalBucket.Tokens--
+	return true
+}
+
+// GetRemainingTokens returns the number of tokens remaining for an IP
+func (r *RateLimiter) GetRemainingTokens(ip string) float64 {
+	r.Mu.RLock()
+	defer r.Mu.RUnlock()
+
+	bucket, exists := r.Buckets[ip]
+	if !exists {
+		return float64(config.RateLimit.Burst)
+	}
+	
+	if bucket.Blocked {
+		return 0
+	}
+	
+	return bucket.Tokens
+}
+
+// GetBlockedUntil returns when an IP will be unblocked
+func (r *RateLimiter) GetBlockedUntil(ip string) *time.Time {
+	r.Mu.RLock()
+	defer r.Mu.RUnlock()
+
+	bucket, exists := r.Buckets[ip]
+	if !exists || !bucket.Blocked {
+		return nil
+	}
+	
+	return &bucket.BlockedUntil
+}
+
+func rateLimitMiddleware() gin.HandlerFunc {
+	// Initialize rate limiter if not already done
+	if rateLimiter == nil {
+		rateLimiter = initRateLimiter()
+	}
+
+	return func(c *gin.Context) {
+		// Skip rate limiting for certain paths if needed
+		// if c.Request.URL.Path == "/some-unrestricted-path" {
+		//     c.Next()
+		//     return
+		// }
+
+		// Check if the request is allowed
+		if !rateLimiter.Allow(c) {
+			ip := c.ClientIP()
+			remaining := rateLimiter.GetRemainingTokens(ip)
+			
+			// Check if IP is blocked
+			blockedUntil := rateLimiter.GetBlockedUntil(ip)
+			if blockedUntil != nil {
+				logger.WithFields(logrus.Fields{
+					"ip":        ip,
+					"blocked_until": blockedUntil.Format(time.RFC3339),
+				}).Warn("Blocked IP attempted request")
+
+				c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", config.RateLimit.Requests))
+				c.Header("X-RateLimit-Remaining", "0")
+				c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", blockedUntil.Unix()))
+				c.Header("Retry-After", fmt.Sprintf("%d", int(blockedUntil.Sub(time.Now()).Seconds())))
+				
+				c.JSON(http.StatusForbidden, gin.H{
+					"error": "Access temporarily blocked due to excessive requests",
+					"blocked_until": blockedUntil.Format(time.RFC3339),
+				})
+				c.Abort()
+				return
+			}
+
+			// For normal rate limiting (not blocked)
+			resetTime := time.Now().Add(time.Second * time.Duration(config.RateLimit.Period))
+			if remaining > 0 {
+				// Calculate when the next token will be available
+				resetTime = time.Now().Add(time.Duration(1/float64(config.RateLimit.Requests/config.RateLimit.Period)) * time.Second)
+			}
+			
+			logger.WithFields(logrus.Fields{
+				"ip":        ip,
+				"remaining": remaining,
+				"reset":     resetTime.Format(time.RFC3339),
 			}).Warn("Rate limit exceeded")
 
+			// Set rate limit headers
+			c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", config.RateLimit.Requests))
+			c.Header("X-RateLimit-Remaining", fmt.Sprintf("%.1f", remaining))
+			c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", resetTime.Unix()))
+			c.Header("Retry-After", fmt.Sprintf("%d", int(resetTime.Sub(time.Now()).Seconds())))
+			
 			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error": "Too many requests. Please try again later.",
+				"error": "Rate limit exceeded. Please try again later.",
+				"retry_after": int(resetTime.Sub(time.Now()).Seconds()),
 			})
 			c.Abort()
 			return
 		}
 
-		ipRequests[ip]++
+		// Set rate limit headers for successful requests too
+		ip := c.ClientIP()
+		remaining := rateLimiter.GetRemainingTokens(ip)
+		c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", config.RateLimit.Requests))
+		c.Header("X-RateLimit-Remaining", fmt.Sprintf("%.1f", remaining))
+		
 		c.Next()
 	}
 }
