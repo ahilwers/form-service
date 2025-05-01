@@ -34,6 +34,7 @@ type FormSubmission struct {
 type Config struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
 	MaxFieldLength int      `yaml:"max_field_length"`
+	MongoURI       string   `yaml:"mongo_uri"`
 	Auth           struct {
 		Username string `yaml:"username"`
 		Password string `yaml:"password"`
@@ -61,6 +62,7 @@ var (
 func loadConfig() error {
 	// Default values
 	config.MaxFieldLength = 1000
+	config.MongoURI = "mongodb://localhost:27017" // Default MongoDB URI
 	
 	// Default rate limit settings
 	config.RateLimit.Requests = 15        // 15 requests
@@ -88,6 +90,9 @@ func loadConfig() error {
 	if envPassword := os.Getenv("AUTH_PASSWORD"); envPassword != "" {
 		config.Auth.Password = envPassword
 	}
+	if envMongoURI := os.Getenv("MONGO_URI"); envMongoURI != "" {
+		config.MongoURI = envMongoURI
+	}
 
 	// Validate required auth configuration
 	if config.Auth.Username == "" || config.Auth.Password == "" {
@@ -114,7 +119,7 @@ func main() {
 	defer cancel()
 
 	var err error
-	client, err = mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, err = mongo.Connect(ctx, options.Client().ApplyURI(config.MongoURI))
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to connect to MongoDB")
 	}
@@ -127,6 +132,7 @@ func main() {
 	logger.WithFields(logrus.Fields{
 		"allowed_origins":  config.AllowedOrigins,
 		"max_field_length": config.MaxFieldLength,
+		"mongo_uri":        config.MongoURI,
 	}).Info("Service configuration loaded")
 
 	// Initialize Gin router
