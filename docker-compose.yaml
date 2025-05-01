@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   form-service:
-    image: hilwers-form-service:latest
+    image: ahilwers/form-service:0.10
     container_name: form-service
     restart: unless-stopped
     ports:
