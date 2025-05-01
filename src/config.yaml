@@ -7,6 +7,9 @@ allowed_origins:
 # Maximum length for text fields (optional, default: 1000)
 # max_field_length: 1000
 
+# MongoDB connection URI (optional, default: mongodb://localhost:27017)
+mongo_uri: "mongodb://localhost:27017"
+
 # Basic Auth configuration
 # auth:
 #   username: "admin"
