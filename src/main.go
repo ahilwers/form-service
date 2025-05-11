@@ -19,6 +19,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"gopkg.in/mail.v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -46,6 +47,17 @@ type Config struct {
 		GlobalRequests  int `yaml:"global_requests"`   // Global requests per period
 		IPBlockDuration int `yaml:"ip_block_duration"` // Duration to block IPs in minutes
 	} `yaml:"rate_limit"`
+	SMTP struct {
+		Enabled  bool   `yaml:"enabled"`  // Whether to enable email notifications
+		Host     string `yaml:"host"`     // SMTP server host
+		Port     int    `yaml:"port"`     // SMTP server port
+		SSL      bool   `yaml:"ssl"`      // Whether to use SSL/TLS instead of STARTTLS
+		Username string `yaml:"username"` // SMTP username
+		Password string `yaml:"password"` // SMTP password
+		From     string `yaml:"from"`     // Sender email address
+		To       string `yaml:"to"`       // Recipient email address
+		Subject  string `yaml:"subject"`  // Email subject template
+	} `yaml:"smtp"`
 }
 
 var (
@@ -71,6 +83,12 @@ func loadConfig() error {
 	config.RateLimit.GlobalRequests = 100 // 100 requests per minute globally
 	config.RateLimit.IPBlockDuration = 30 // Block IPs for 30 minutes
 
+	// Default SMTP settings (disabled by default)
+	config.SMTP.Enabled = false
+	config.SMTP.Port = 587 // Default SMTP port for STARTTLS
+	config.SMTP.SSL = false // Default to STARTTLS instead of SSL/TLS
+	config.SMTP.Subject = "New Form Submission"
+
 	// Try to load configuration file
 	if configFile, err := os.ReadFile("config.yaml"); err == nil {
 		if err := yaml.Unmarshal(configFile, &config); err != nil {
@@ -94,9 +112,57 @@ func loadConfig() error {
 		config.MongoURI = envMongoURI
 	}
 
+	// SMTP configuration from environment variables
+	if envSMTPEnabled := os.Getenv("SMTP_ENABLED"); envSMTPEnabled == "true" {
+		config.SMTP.Enabled = true
+	}
+	if envSMTPHost := os.Getenv("SMTP_HOST"); envSMTPHost != "" {
+		config.SMTP.Host = envSMTPHost
+	}
+	if envSMTPPort := os.Getenv("SMTP_PORT"); envSMTPPort != "" {
+		if port, err := fmt.Sscanf(envSMTPPort, "%d", &config.SMTP.Port); err != nil || port <= 0 {
+			logger.WithError(err).Warn("Invalid SMTP port, using default")
+		}
+	}
+	if envSMTPSSL := os.Getenv("SMTP_SSL"); envSMTPSSL == "true" {
+		config.SMTP.SSL = true
+		// Automatically set port to 465 if SSL is enabled and port wasn't explicitly set
+		if os.Getenv("SMTP_PORT") == "" {
+			config.SMTP.Port = 465 // Default SSL/TLS port
+		}
+	}
+	if envSMTPUsername := os.Getenv("SMTP_USERNAME"); envSMTPUsername != "" {
+		config.SMTP.Username = envSMTPUsername
+	}
+	if envSMTPPassword := os.Getenv("SMTP_PASSWORD"); envSMTPPassword != "" {
+		config.SMTP.Password = envSMTPPassword
+	}
+	if envSMTPFrom := os.Getenv("SMTP_FROM"); envSMTPFrom != "" {
+		config.SMTP.From = envSMTPFrom
+	}
+	if envSMTPTo := os.Getenv("SMTP_TO"); envSMTPTo != "" {
+		config.SMTP.To = envSMTPTo
+	}
+	if envSMTPSubject := os.Getenv("SMTP_SUBJECT"); envSMTPSubject != "" {
+		config.SMTP.Subject = envSMTPSubject
+	}
+
 	// Validate required auth configuration
 	if config.Auth.Username == "" || config.Auth.Password == "" {
 		return fmt.Errorf("basic auth credentials are required. Please set them in config.yaml or via AUTH_USERNAME and AUTH_PASSWORD environment variables")
+	}
+
+	// Validate SMTP configuration if enabled
+	if config.SMTP.Enabled {
+		if config.SMTP.Host == "" {
+			return fmt.Errorf("SMTP host is required when SMTP is enabled")
+		}
+		if config.SMTP.From == "" {
+			return fmt.Errorf("SMTP sender email (from) is required when SMTP is enabled")
+		}
+		if config.SMTP.To == "" {
+			return fmt.Errorf("SMTP recipient email (to) is required when SMTP is enabled")
+		}
 	}
 
 	return nil
@@ -594,6 +660,62 @@ func validateInput(key, value string) (string, bool) {
 	return value, true
 }
 
+// sendEmailNotification sends an email with form submission content
+func sendEmailNotification(projectID string, formData map[string]interface{}) error {
+	// Skip if SMTP is not configured or disabled
+	if !config.SMTP.Enabled {
+		return nil
+	}
+
+	// Create a new message
+	m := mail.NewMessage()
+	m.SetHeader("From", config.SMTP.From)
+	m.SetHeader("To", config.SMTP.To)
+	m.SetHeader("Subject", config.SMTP.Subject+" - Project: "+projectID)
+
+	// Build email body with form data
+	body := fmt.Sprintf("Form Submission for Project: %s\n\nSubmitted at: %s\n\nForm Data:\n", 
+		projectID, time.Now().Format(time.RFC1123))
+
+	// Add each form field to the email body
+	for key, value := range formData {
+		body += fmt.Sprintf("%s: %v\n", key, value)
+	}
+
+	m.SetBody("text/plain", body)
+
+	// Create a new dialer with SMTP server settings
+	d := mail.NewDialer(config.SMTP.Host, config.SMTP.Port, config.SMTP.Username, config.SMTP.Password)
+	d.Timeout = 10 * time.Second
+	
+	// Configure SSL/TLS settings
+	if config.SMTP.SSL {
+		// Use SSL/TLS directly
+		d.SSL = true
+	} else {
+		// Use STARTTLS (default)
+		d.StartTLSPolicy = mail.OpportunisticStartTLS
+	}
+
+	// Send the email
+	err := d.DialAndSend(m)
+	if err != nil {
+		logger.WithFields(logrus.Fields{
+			"error":     err,
+			"projectID": projectID,
+			"smtp_host": config.SMTP.Host,
+		}).Error("Failed to send email notification")
+		return err
+	}
+
+	logger.WithFields(logrus.Fields{
+		"projectID": projectID,
+		"recipient": config.SMTP.To,
+	}).Info("Email notification sent successfully")
+
+	return nil
+}
+
 func handleFormSubmission(c *gin.Context) {
 	projectIDStr := c.Param("id")
 	if projectIDStr == "" {
@@ -698,6 +820,19 @@ func handleFormSubmission(c *gin.Context) {
 		}).Error("Failed to save submission")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save submission"})
 		return
+	}
+
+	// Send email notification if SMTP is configured
+	if config.SMTP.Enabled {
+		go func() {
+			err := sendEmailNotification(projectIDStr, formData)
+			if err != nil {
+				logger.WithFields(logrus.Fields{
+					"error": err,
+					"id":    projectIDStr,
+				}).Error("Email notification failed")
+			}
+		}()
 	}
 
 	logger.WithFields(logrus.Fields{

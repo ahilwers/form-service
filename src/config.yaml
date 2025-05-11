@@ -11,6 +11,19 @@ allowed_origins:
 mongo_uri: "mongodb://localhost:27017"
 
 # Basic Auth configuration
-# auth:
-#   username: "admin"
-#   password: "secret"
+auth:
+  username: "admin"
+  password: "secret"
+
+# SMTP configuration for email notifications
+# Set enabled to true and configure the other fields to enable email notifications
+smtp:
+  enabled: false  # Set to true to enable email notifications
+  host: ""        # SMTP server host (e.g., smtp.gmail.com)
+  port: 587       # SMTP server port (usually 587 for STARTTLS, 465 for SSL/TLS)
+  ssl: false      # Set to true to use SSL/TLS instead of STARTTLS (typically with port 465)
+  username: ""    # SMTP username (usually your email address)
+  password: ""    # SMTP password or app password
+  from: ""        # Sender email address
+  to: ""          # Recipient email address
+  subject: "New Form Submission"  # Email subject template

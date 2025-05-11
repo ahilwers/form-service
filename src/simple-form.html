@@ -1,75 +1,82 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="de">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Einfaches Kontaktformular</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        .form-group {
-            margin-bottom: 15px;
-        }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
-        }
-        input[type="text"],
-        input[type="email"],
-        textarea {
-            width: 100%;
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            box-sizing: border-box;
-        }
-        textarea {
-            height: 150px;
-            resize: vertical;
-        }
-        button {
-            background-color: #4CAF50;
-            color: white;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 16px;
-        }
-        button:hover {
-            background-color: #45a049;
-        }
-    </style>
-</head>
-<body>
-    <h1>Kontaktformular</h1>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Einfaches Kontaktformular</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                max-width: 600px;
+                margin: 0 auto;
+                padding: 20px;
+            }
+
+            .form-group {
+                margin-bottom: 15px;
+            }
+
+            label {
+                display: block;
+                margin-bottom: 5px;
+                font-weight: bold;
+            }
+
+            input[type="text"],
+            input[type="email"],
+            textarea {
+                width: 100%;
+                padding: 8px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                box-sizing: border-box;
+            }
+
+            textarea {
+                height: 150px;
+                resize: vertical;
+            }
+
+            button {
+                background-color: #4caf50;
+                color: white;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 16px;
+            }
+
+            button:hover {
+                background-color: #45a049;
+            }
+        </style>
+    </head>
+
+    <body>
+        <h1>Kontaktformular</h1>
     <form action="http://localhost:8080/form/507f1f77bcf86cd799439011" method="POST">
-        <div class="form-group">
-            <label for="name">Name *</label>
-            <input type="text" id="name" name="name" required>
-        </div>
-        
-        <div class="form-group">
-            <label for="email">E-Mail *</label>
-            <input type="email" id="email" name="email" required>
-        </div>
-        
-        <div class="form-group">
-            <label for="subject">Betreff</label>
-            <input type="text" id="subject" name="subject">
-        </div>
-        
-        <div class="form-group">
-            <label for="message">Nachricht *</label>
-            <textarea id="message" name="message" required></textarea>
-        </div>
-        
-        <button type="submit">Absenden</button>
-    </form>
-</body>
-</html> 
+            <div class="form-group">
+                <label for="name">Name *</label>
+                <input type="text" id="name" name="name" required />
+            </div>
+
+            <div class="form-group">
+                <label for="email">E-Mail *</label>
+                <input type="email" id="email" name="email" required />
+            </div>
+
+            <div class="form-group">
+                <label for="subject">Betreff</label>
+                <input type="text" id="subject" name="subject" />
+            </div>
+
+            <div class="form-group">
+                <label for="message">Nachricht *</label>
+                <textarea id="message" name="message" required></textarea>
+            </div>
+
+            <button type="submit">Absenden</button>
+        </form>
+    </body>
+</html>
